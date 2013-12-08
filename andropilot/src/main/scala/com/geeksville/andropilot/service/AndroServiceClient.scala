@@ -28,17 +28,8 @@ trait AndroServiceClient extends AndroidLogger with AndropilotPrefs {
   private var myVListener: Option[MyVehicleListener] = None
   protected var service: Option[AndropilotService] = None
 
-  def isLowVolt = (for { v <- myVehicle; volt <- v.batteryVoltage } yield { volt < minVoltage }).getOrElse(false)
-
-  /// Apparently ardupane treats -1 for pct charge as 'no idea'
-  def isLowBatPercent = (for { v <- myVehicle; pct <- v.batteryPercent } yield { pct < minBatPercent }).getOrElse(false)
-  def isLowRssi = (for { v <- myVehicle; r <- v.radio } yield {
-    val span = minRssiSpan
-
-    r.rssi - span < r.noise || r.remrssi - span < r.remnoise
-  }).getOrElse(false)
-  def isLowNumSats = (for { v <- myVehicle; n <- v.numSats } yield { n < minNumSats }).getOrElse(true)
-  def isWarning = isLowVolt || isLowBatPercent || isLowRssi || isLowNumSats
+  /// Are we talking to at least one vehicle
+  def isVehicleConnected = service.map(_.isConnected).getOrElse(false)
 
   /**
    * Override if you need to do stuff once the connection is up
@@ -89,9 +80,6 @@ trait AndroServiceClient extends AndroidLogger with AndropilotPrefs {
    */
   class MyVehicleListener(val v: VehicleModel) extends InstrumentedActor {
 
-    /// On first position update zoom in on plane
-    private var hasLocation = false
-
     val subscription = v.eventStream.subscribe(this, isInterested _)
 
     override def postStop() {
@@ -102,7 +90,7 @@ trait AndroServiceClient extends AndroidLogger with AndropilotPrefs {
     override def onReceive = onVehicleReceive
   }
 
-  def onVehicleReceive: MyVehicleListener#Receiver
+  def onVehicleReceive: InstrumentedActor.Receiver
 
   private def stopVehicleModel() {
     myVListener.foreach { v =>

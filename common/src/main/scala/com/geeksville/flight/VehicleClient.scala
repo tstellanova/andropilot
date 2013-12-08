@@ -19,21 +19,49 @@ import com.geeksville.mavlink.MavlinkEventBus
 import com.geeksville.mavlink.MavlinkStream
 import com.geeksville.util.ThrottledActor
 import com.geeksville.mavlink.MavlinkConstants
+import com.geeksville.akka.InstrumentedActor
 
 /**
  * An endpoint client that talks to a vehicle (adds message retries etc...)
+ *
+ * @param targetOverride if specified then we will only talk with the specified sysId
  */
-class VehicleClient extends HeartbeatMonitor with VehicleSimulator with MavlinkConstants {
+class VehicleClient(targetOverride: Option[Int] = None) extends HeartbeatMonitor with VehicleSimulator with HeartbeatSender with MavlinkConstants {
 
   case class RetryExpired(ctx: RetryContext)
 
+  private var defaultStreamFreq = 1
+  private var positionStreamFreq = 3
+  private var ahrsStreamFreq = 1
+
   private val retries = HashSet[RetryContext]()
+
+  // Default to listening to all traffic until we know the id of our vehicle
+  // This lets the vehicle model receive messages from its vehicle...
+  private var subscriber = MavlinkEventBus.subscribe(this, targetOverride.getOrElse(-1))
+
+  /**
+   * If an override has been set, use that otherwise try to talk to whatever vehicle we've received heartbeats from
+   */
+  override def targetSystem = targetOverride.getOrElse {
+    heartbeatSysId.getOrElse(1)
+  }
 
   override def systemId = 253 // We always claim to be a ground controller (FIXME, find a better way to pick a number)
 
+  override protected def onHeartbeatFound() {
+    if (!targetOverride.isDefined) {
+      // We didn't previously have any particular sysId filter installed.  Now that we know our vehicle
+      // we can be more selective.  Resubscribe with the new system id
+      MavlinkEventBus.removeSubscription(subscriber)
+      subscriber = MavlinkEventBus.subscribe(this, targetSystem)
+    }
+    super.onHeartbeatFound()
+  }
+
   override def onReceive = mReceive.orElse(super.onReceive)
 
-  private def mReceive: Receiver = {
+  private def mReceive: InstrumentedActor.Receiver = {
 
     case RetryExpired(ctx) =>
       ctx.doRetry()
@@ -124,27 +152,40 @@ class VehicleClient extends HeartbeatMonitor with VehicleSimulator with MavlinkC
       None
   }
 
+  private def setFreq(dest: Int, fIn: Int, enabled: Boolean) {
+    val f = if (VehicleClient.isUsbBusted) 1 else fIn
+    sendMavlink(requestDataStream(dest, f, enabled))
+    sendMavlink(requestDataStream(dest, f, enabled))
+  }
+
+  protected def setAhrsFreq(fIn: Int) {
+    ahrsStreamFreq = fIn
+    setFreq(MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA1, fIn, true)
+  }
+
+  protected def setPositionFreq(fIn: Int) {
+    positionStreamFreq = fIn
+    setFreq(MAV_DATA_STREAM.MAV_DATA_STREAM_POSITION, fIn, true)
+  }
+
   /**
    * Turn streaming on or off (and if USB is crummy on this machine, turn it on real slow)
    */
-  protected def setStreamEnable(enabled: Boolean) {
+  protected[flight] def setStreamEnable(enabled: Boolean) {
 
     log.info("Setting stream enable: " + enabled)
 
-    val defaultFreq = 1
-    val interestingStreams = Seq(MAV_DATA_STREAM.MAV_DATA_STREAM_RAW_SENSORS -> defaultFreq,
-      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTENDED_STATUS -> defaultFreq,
+    val interestingStreams = Seq(MAV_DATA_STREAM.MAV_DATA_STREAM_RAW_SENSORS -> defaultStreamFreq,
+      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTENDED_STATUS -> defaultStreamFreq,
       MAV_DATA_STREAM.MAV_DATA_STREAM_RC_CHANNELS -> 2,
-      MAV_DATA_STREAM.MAV_DATA_STREAM_POSITION -> defaultFreq,
-      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA1 -> 10, // faster AHRS display use a bigger #
-      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA2 -> defaultFreq,
-      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA3 -> defaultFreq)
+      MAV_DATA_STREAM.MAV_DATA_STREAM_POSITION -> positionStreamFreq,
+      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA1 -> ahrsStreamFreq, // faster AHRS display use a bigger #
+      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA2 -> defaultStreamFreq,
+      MAV_DATA_STREAM.MAV_DATA_STREAM_EXTRA3 -> defaultStreamFreq)
 
     interestingStreams.foreach {
       case (id, freqHz) =>
-        val f = if (VehicleClient.isUsbBusted) 1 else freqHz
-        sendMavlink(requestDataStream(id, f, enabled))
-        sendMavlink(requestDataStream(id, f, enabled))
+        setFreq(id, freqHz, enabled)
     }
   }
 }

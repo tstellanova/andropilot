@@ -11,14 +11,14 @@
     <EditTextPreference
         android:defaultValue="9.5"
         android:dialogTitle="Minimum battery voltage"
-        android:inputType="numberDecimal"
+        android:inputType="numberDecimal|numberSigned"
         android:key="min_volt"
         android:summary="If voltage falls below this level, Andropilot will warn you"
         android:title="Voltage warn level" />
     <EditTextPreference
         android:defaultValue="25"
         android:dialogTitle="Minimum battery percentage"
-        android:inputType="number"
+        android:inputType="number|numberSigned"
         android:key="min_batpct"
         android:summary="If battery percent falls below this level, Andropilot will warn you"
         android:title="Percent charge warn level" />
@@ -57,11 +57,23 @@
         android:key="maxfollow_distance"
         android:summary="If greater than zero, tilting tablet will move vehicle"
         android:title="Lead-it Maximum distance" />
+    <EditTextPreference
+        android:defaultValue="2.0"
+        android:dialogTitle="Lead-it update interval"
+        android:inputType="number|numberSigned"
+        android:key="follow_interval"
+        android:summary="How many seconds between each lead-it update"
+        android:title="Lead-it update interval" />
 
     <CheckBoxPreference
         android:defaultValue="true"
         android:key="follow_plane"
         android:summary="Try to keep vehicle centered in map"
         android:title="Center on map" />
+    <CheckBoxPreference
+        android:defaultValue="false"
+        android:key="use_old_ac"
+        android:summary="Turn this on to work with AC builds older than 3.0 (slower)"
+        android:title="Support old arducopter builds" />
 
 </PreferenceScreen>

@@ -4,12 +4,18 @@ import org.mavlink.messages.ardupilotmega.msg_param_value
 import org.mavlink.messages.MAV_TYPE
 import org.mavlink.messages.MAVLinkMessage
 import com.geeksville.mavlink.MavlinkConstants
+import com.ridemission.rest.ASJSON
+import com.ridemission.rest.JObject
 
 /**
  * Parameter access, but only read-only (so it can work at log playback time)
  */
 trait ParametersReadOnlyModel extends MavlinkConstants {
-  lazy val paramDocs = (new ParameterDocFile).forVehicle(vehicleTypeName)
+  // Load this at start
+  val docFile = new ParameterDocFile
+
+  // Parse it later
+  lazy val paramDocs = docFile.forVehicle(vehicleTypeName)
 
   private val planeCodeToModeMap = Map(0 -> "MANUAL", 1 -> "CIRCLE", 2 -> "STABILIZE",
     3 -> "TRAINING",
@@ -28,8 +34,38 @@ trait ParametersReadOnlyModel extends MavlinkConstants {
     8 -> "POSITION",
     9 -> "LAND",
     10 -> "OF_LOITER",
-    11 -> "TOY_A",
-    12 -> "TOY_B")
+    11 -> "TOY",
+    13 -> "SPORT")
+
+  /**
+   * A set of modes that are selectable when the vehicle is flying in simple mode
+   */
+  protected val simpleFlightModes = Map("LAND" -> true, "RTL" -> false,
+    "LOITER" -> false, "AUTO" -> true, "STABILIZE" -> false, "FBW_B" -> false, "Disarm" -> true)
+
+  // FIXME - add support for a takeoff waypoint set
+  protected val simpleGroundModes = Map("Arm" -> true, "LOITER" -> false, "AUTO" -> true, "STABILIZE" -> false, "Disarm" -> false)
+
+  // Modes to allow while downloading wpts or params
+  protected val initializingModes = Map("Disarm" -> false)
+
+  /**
+   * A mapping to RGB tuples (chosen to match the colors used by Tridge's python tool)
+   */
+  val modeToColorMap = Map(
+    "MANUAL" -> (255, 0, 0),
+    "AUTO" -> (0, 255, 0),
+    "LOITER" -> (0, 0, 255),
+    "FBWA" -> (255, 100, 0),
+    "RTL" -> (255, 0, 100),
+    "STABILIZE" -> (100, 255, 0),
+    "LAND" -> (0, 255, 100),
+    "STEERING" -> (100, 0, 255),
+    "HOLD" -> (0, 100, 255),
+    "ALT_HOLD" -> (255, 100, 100),
+    "CIRCLE" -> (100, 255, 100),
+    "GUIDED" -> (100, 100, 255),
+    "ACRO" -> (255, 255, 0))
 
   private val roverCodeToModeMap = Map(
     0 -> "MANUAL", 2 -> "LEARNING", 3 -> "STEERING",
@@ -43,11 +79,39 @@ trait ParametersReadOnlyModel extends MavlinkConstants {
   /**
    * Wrap the raw message with clean accessors, when a value is set, apply the change to the target
    */
-  class ROParamValue {
+  class ROParamValue extends ASJSON {
     var raw: Option[msg_param_value] = None
 
     /// The docs for this parameter (if we can find them)
     def docs = for { id <- getId; d <- paramDocs.get(id) } yield { d }
+
+    /**
+     * Check this parameter to see if it is within the range expected by the documentation, if not in range return false
+     */
+    def isInRange = (for {
+      range <- rangeOpt
+      v <- raw
+    } yield {
+      v.param_value >= range._1 && v.param_value <= range._2
+    }).getOrElse(true)
+
+    def rangeOpt = for {
+      doc <- docs
+      range <- doc.range
+    } yield {
+      range
+    }
+
+    /**
+     * Should this parameter be shared with others (or is it so instance specific it should not be passed around)
+     */
+    def isSharable =
+      (for {
+        doc <- docs
+        share <- doc.share
+      } yield {
+        share.toLowerCase == "vehicle"
+      }).getOrElse(false)
 
     def getId = raw.map(_.getParam_id)
 
@@ -61,6 +125,11 @@ trait ParametersReadOnlyModel extends MavlinkConstants {
     }
 
     def getInt = raw.map { v => v.param_value.toInt }
+    def getFloat = raw.map { v => v.param_value }
+
+    def getBoolean = getInt.map(_ != 0)
+
+    def asJSON = JObject("id" -> getId, "value" -> getValue, "as_str" -> asString)
 
     /**
      * @return a nice human readable version of this value (decoding based on documentation if possible)
@@ -88,10 +157,19 @@ trait ParametersReadOnlyModel extends MavlinkConstants {
     "ArduPlane"
 
   def isPlane = vehicleType.map(_ == MAV_TYPE.MAV_TYPE_FIXED_WING).getOrElse(false)
-  def isCopter = vehicleType.map { t =>
+
+  /**
+   * Are we on a copter? or None if not sure
+   */
+  def isCopterOpt = vehicleType.map { t =>
     (t == MAV_TYPE.MAV_TYPE_QUADROTOR) || (t == MAV_TYPE.MAV_TYPE_HELICOPTER) || (t == MAV_TYPE.MAV_TYPE_HEXAROTOR) || (t == MAV_TYPE.MAV_TYPE_OCTOROTOR)
-  }.getOrElse(true)
+  }
+
+  def isCopter = isCopterOpt.getOrElse(true)
   def isRover = vehicleType.map(_ == MAV_TYPE.MAV_TYPE_GROUND_ROVER).getOrElse(false)
+
+  // Rover uses a different mode prefix than the other vehicle types
+  def flightModePrefix = if (isRover) "MODE" else "FLTMODE"
 
   /// A MAV_TYPE vehicle code
   def vehicleType: Option[Int]

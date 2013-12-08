@@ -13,13 +13,17 @@ import com.geeksville.logback.Logging
 import com.geeksville.akka.PoisonPill
 import java.net.ConnectException
 import scala.concurrent._
+import scala.util.Random
+import java.net.SocketTimeoutException
 
 // with SerialPortEventListener
 
 /**
  * Talks mavlink out a serial port
+ *
+ * @param sysIdOverride if set, we will replace any received sysIds with this alternative (useful for remapping sysId based on interface)
  */
-class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends MavlinkSender with MavlinkReceiver {
+class MavlinkStream(outgen: => OutputStream, ingen: => InputStream, val sysIdOverride: Option[Int] = None) extends MavlinkSender with MavlinkReceiver {
 
   log.debug("MavlinkStream starting")
   MavlinkStream.isIgnoreReceive = false
@@ -34,13 +38,25 @@ class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends Mavl
   /// This skanky hack is to make sure that we only touch the inputstream if it has already been created
   private var isInstreamValid = false
 
+  /// The id we expect for vehicles on this port (possibly will be overridden)
+  val expectedSysId = 1
+
   val rxThread = ThreadTools.createDaemon("streamRx")(rxWorker)
+
+  /**
+   * If true we will pretend to drop many packets
+   */
+  var simulateUnreliable = false
+
+  private val rand = new Random(System.currentTimeMillis)
 
   //rxThread.setPriority(Thread.MAX_PRIORITY)
   rxThread.start()
 
   // Mission control does this, seems to be necessary to keep device from hanging up on us
   //out.write("\r\n\r\n\r\n".map(_.toByte).toArray)
+
+  private def shouldDrop = simulateUnreliable && rand.nextInt(10) < 2
 
   protected def doSendMavlink(bytes: Array[Byte]) {
     //log.debug("Sending ser (sysId=%d): %s".format(msg.sysId, msg))
@@ -81,6 +97,9 @@ class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends Mavl
         var oldLost = 0L
         var oldNumPacket = 0L
         var numPacket = 0L
+        var prevSeq = -1
+
+        val overrideId = sysIdOverride.getOrElse(-1)
 
         while (!self.isTerminated) {
           try {
@@ -88,6 +107,10 @@ class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends Mavl
             val msg = Option(reader.getNextMessage())
             msg.foreach { s =>
               numPacket += 1
+
+              // Reassign sysId if requested
+              if (overrideId != -1 && s.sysId == expectedSysId)
+                s.sysId = overrideId
 
               //log.debug("RxSer: " + s)
               if (reader.getLostBytes > lostBytes) {
@@ -116,9 +139,12 @@ class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends Mavl
                 log.info("msgs per sec %s, bytes dropped per sec=%s".format(mPerSec, dropPerSec))
               }
 
-              //  for profiling
-              if (!MavlinkStream.isIgnoreReceive)
-                handlePacket(s)
+              // Dups are normal, the 3dr radio will duplicate packets if it has nothing better to do
+              if (s.sequence != prevSeq && !MavlinkStream.isIgnoreReceive) //  for profiling
+                if (!shouldDrop)
+                  handlePacket(s)
+
+              prevSeq = s.sequence
             }
           } catch {
 
@@ -137,6 +163,10 @@ class MavlinkStream(outgen: => OutputStream, ingen: => InputStream) extends Mavl
     } catch {
       case ex: ConnectException =>
         log.error("Failure to connect: " + ex.getMessage)
+        self ! PoisonPill
+
+      case ex: SocketTimeoutException =>
+        log.error("Socket timeout: " + ex.getMessage)
         self ! PoisonPill
     }
 

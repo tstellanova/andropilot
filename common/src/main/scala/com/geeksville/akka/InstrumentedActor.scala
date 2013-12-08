@@ -9,12 +9,15 @@ object Context {
 
 object PoisonPill
 
+object InstrumentedActor {
+  type Receiver = PartialFunction[Any, Unit]
+}
+
 /**
  * Try to make scala actors look as much like akka actors as possible
  */
 trait InstrumentedActor extends Actor with Logging {
-
-  type Receiver = PartialFunction[Any, Unit]
+  import InstrumentedActor._
 
   private var isDead = false
 
@@ -28,6 +31,9 @@ trait InstrumentedActor extends Actor with Logging {
   def acontext = Context
 
   def isTerminated = isDead
+
+  /// For debugging it is sometimes useful to peek at this
+  def debugMailboxSize = mailboxSize
 
   /**
    * The replacement for the akka receive method

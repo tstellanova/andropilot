@@ -29,6 +29,8 @@ trait HttpFileSystem {
  * Just reads files from a file system
  */
 class JavaFileSystem(val rootDir: File) extends HttpFileSystem with Logging {
+  println("Exposing java filesystem at " + rootDir.getAbsolutePath)
+
   private def makeFile(name: String) = new File(rootDir, name)
 
   def exists(name: String) = {
@@ -59,7 +61,7 @@ class FileHandler(val urlPath: String, fs: HttpFileSystem)
     this(urlPath, new JavaFileSystem(rootDir))
 
   /// @return true if this handler will match against the provided path
-  override def canHandle(matches: List[String]) = super.canHandle(matches) && fs.exists(matches(0))
+  override def canHandle(method: Method.Value, matches: List[String]) = super.canHandle(method, matches) && fs.exists(matches(0))
 
   override protected def handleRequest(req: Request) = {
     var relpath = req.matches(0)

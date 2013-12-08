@@ -18,7 +18,7 @@ case class Cancellable(f: ScheduledFuture[_]) {
 }
 
 class Scheduler extends Logging {
-  val jscheduler = new ScheduledThreadPoolExecutor(1)
+  val jscheduler = new ScheduledThreadPoolExecutor(4)
 
   jscheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false)
 
@@ -35,7 +35,7 @@ class Scheduler extends Logging {
       dest ! msg
     }
 
-    scheduleOnce(d)(run)
+    scheduleOnce(d)(run _)
   }
 
   def scheduleOnce(d: Duration)(cb: () => Unit): Cancellable = {
@@ -47,10 +47,10 @@ class Scheduler extends Logging {
     Cancellable(r)
   }
 
-  def schedule(initial: Duration, next: Duration)(cb: => Unit) = {
+  def schedule(initial: Duration, next: Duration)(cb: () => Unit) = {
 
-    logger.info("scheduling")
-    val r = jscheduler.scheduleWithFixedDelay(cb _, initial.toMillis, next.toMillis, TimeUnit.MILLISECONDS)
+    logger.debug(s"scheduling $next: $cb")
+    val r = jscheduler.scheduleWithFixedDelay(cb, initial.toMillis, next.toMillis, TimeUnit.MILLISECONDS)
 
     Cancellable(r)
   }

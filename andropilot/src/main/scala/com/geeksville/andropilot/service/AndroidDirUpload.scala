@@ -17,16 +17,17 @@ import com.geeksville.andropilot.gui.NotificationIds
 import com.bugsense.trace.BugSenseHandler
 import android.app.Notification
 import java.io.IOException
+import com.geeksville.andropilot.UsesDirectories
 
 /**
  * Scan for tlogs in the specified directory.  If found, upload them to droneshare and then either delete or
  * move to destdir
  */
 class AndroidDirUpload extends IntentService("Uploader")
-  with AndroidLogger with AndropilotPrefs with UsesResources {
+  with AndroidLogger with AndropilotPrefs with UsesResources with UsesDirectories {
 
-  val srcDirOpt = AndropilotService.logDirectory
-  val destDirOpt = AndropilotService.uploadedDirectory
+  lazy val srcDirOpt = logDirectory
+  lazy val destDirOpt = uploadedDirectory
 
   private var curUpload: Option[AndroidUpload] = None
 
@@ -51,10 +52,11 @@ class AndroidDirUpload extends IntentService("Uploader")
 
     toSend match {
       case Some(n) =>
-        NetworkStateReceiver.register(this) // We now want to find out about network connectivity changes
-
         // We have a candidate for uploading, is the network good and user prefs entered?
         if (!isUploading && canUpload) { // If an upload is in progress wait for it to finish
+
+          NetworkStateReceiver.register(this) // We now want to find out about network connectivity changes
+
           //toast(R.string.starting_upload, false)
           curUpload = Some(new AndroidUpload(n))
         }

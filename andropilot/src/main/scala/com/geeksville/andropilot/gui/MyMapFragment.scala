@@ -40,6 +40,12 @@ import com.geeksville.flight.DoAddWaypoint
 import com.geeksville.gmaps.PolylineFactory
 import org.mavlink.messages.FENCE_ACTION
 import com.geeksville.flight.MsgWaypointCurrentChanged
+import com.geeksville.gmaps.CircleFactory
+import android.location.LocationListener
+import android.location.LocationManager
+import org.mavlink.messages.ardupilotmega.msg_radio
+import com.geeksville.util.Throttled
+import com.geeksville.flight.StatusText
 
 /**
  * Our customized map fragment
@@ -52,6 +58,8 @@ class MyMapFragment extends SupportMapFragment
   private var waypointMarkers = Seq[DraggableWaypointMarker]()
 
   def mapOpt = Option(getMap)
+
+  private val statusThrottle = new Throttled(15000)
 
   /**
    * If we are going to a GUIDED location
@@ -146,7 +154,6 @@ class MyMapFragment extends SupportMapFragment
     def lat = wp.msg.x
     def lon = wp.msg.y
 
-    override def isAllowGoto = !isHome // Don't let people 'goto' home because that would probably smack them into the ground.  Really they want RTL
     override def isAllowChangeType = !isHome
 
     override def isAltitudeEditable = !isHome
@@ -256,6 +263,8 @@ class MyMapFragment extends SupportMapFragment
    */
   class DraggableWaypointMarker(wp: Waypoint) extends WaypointMarker(wp) {
 
+    override def isAllowGoto = !isHome // Don't let people 'goto' home because that would probably smack them into the ground.  Really they want RTL
+
     override def lat_=(n: Double) { wp.msg.x = n.toFloat }
     override def lon_=(n: Double) { wp.msg.y = n.toFloat }
 
@@ -308,9 +317,10 @@ class MyMapFragment extends SupportMapFragment
     override def icon: Option[BitmapDescriptor] = Some(BitmapDescriptorFactory.fromResource(iconRes))
 
     private def iconRes = (for { s <- service; v <- myVehicle } yield {
-      if (!v.hasHeartbeat || !s.isSerialConnected)
+      //debug(s"in iconres ${v.hasHeartbeat}, ${s.isConnected}")
+      if (!v.hasHeartbeat || !s.isConnected)
         if (v.isCopter) R.drawable.quad_red else R.drawable.plane_red
-      else if (isWarning)
+      else if (s.isWarning)
         if (v.isCopter) R.drawable.quad_yellow else R.drawable.plane_yellow
       else if (v.isCopter) R.drawable.quad_blue else R.drawable.plane_blue
     }).getOrElse(R.drawable.plane_red)
@@ -327,22 +337,22 @@ class MyMapFragment extends SupportMapFragment
     }).getOrElse("No service"))
 
     override def snippet = Some(
-      myVehicle.map { v =>
+      (for { s <- service; v <- myVehicle } yield {
         // Generate a few optional lines of text
 
         val locStr = v.location.map { l =>
           "Altitude %.1fm".format(v.toAGL(l))
         }
 
-        val batStr = if (isLowVolt) Some(S(R.string.low_volt)) else None
-        val pctStr = if (isLowBatPercent) Some(S(R.string.low_charge)) else None
-        val radioStr = if (isLowRssi) Some(S(R.string.low_rssi)) else None
-        val gpsStr = if (isLowNumSats) Some(S(R.string.low_sats)) else None
+        val batStr = if (s.isLowVolt) Some(S(R.string.low_volt)) else None
+        val pctStr = if (s.isLowBatPercent) Some(S(R.string.low_charge)) else None
+        val radioStr = if (s.isLowRssi) Some(S(R.string.low_rssi)) else None
+        val gpsStr = if (s.isLowNumSats) Some(S(R.string.low_sats)) else None
 
         val r = Seq(locStr, batStr, pctStr, radioStr, gpsStr).flatten.mkString(" ")
         //debug("snippet: " + r)
         r
-      }.getOrElse(S(R.string.no_service)))
+      }).getOrElse(S(R.string.no_service)))
 
     override def toString = title.get
 
@@ -351,8 +361,9 @@ class MyMapFragment extends SupportMapFragment
      */
     def update() {
       // Do we need to change icons?
-      if (isWarning != oldWarning) {
-        oldWarning = isWarning
+      val warn = service.map(_.isWarning).getOrElse(false)
+      if (warn != oldWarning) {
+        oldWarning = warn
         redraw()
       }
 
@@ -404,13 +415,16 @@ class MyMapFragment extends SupportMapFragment
         val marker = new VehicleMarker
         s.addMarker(marker)
         planeMarker = Some(marker)
+
+        // Default to last known position
+        map.animateCamera(CameraUpdateFactory.newLatLngZoom(marker.latLng, 16.0f))
       }
     }
 
     planeMarker
   }
 
-  override def onVehicleReceive = {
+  override def onVehicleReceive: InstrumentedActor.Receiver = {
     case l: Location =>
       // log.debug("Handling location: " + l)
       handler.post { () =>
@@ -434,11 +448,17 @@ class MyMapFragment extends SupportMapFragment
 
     case MsgSysStatusChanged =>
       //debug("SysStatus changed")
-      handler.post { () =>
-        updateMarker()
+
+      statusThrottle { () =>
+        handler.post { () =>
+          // radio range might have changed
+          handleWaypoints()
+
+          updateMarker()
+        }
       }
 
-    case MsgStatusChanged(s, _) =>
+    case StatusText(s, _) =>
       debug("Status changed: " + s)
       handler.post { () =>
         updateMarker()
@@ -446,11 +466,8 @@ class MyMapFragment extends SupportMapFragment
 
     case MsgModeChanged(_) =>
       handler.post { () =>
-        myVehicle.foreach { v =>
-
-          // we may need to update the segment lines 
-          handleWaypoints()
-        }
+        // we may need to update the segment lines 
+        handleWaypoints()
 
         updateMarker()
       }
@@ -466,6 +483,7 @@ class MyMapFragment extends SupportMapFragment
       debug("heartbeat found")
       handler.post { () =>
         redrawMarker()
+        handleWaypoints() // We might need to draw the home icon now
         invalidateContextMenu()
       }
 
@@ -476,6 +494,14 @@ class MyMapFragment extends SupportMapFragment
       handler.post(handleWaypoints _)
 
     case MsgWaypointCurrentChanged(n) =>
+      handler.post(handleWaypoints _)
+
+    // geofence options might have changed - so redraw
+    case MsgParametersDownloaded =>
+      handler.post(handleWaypoints _)
+
+    // geofence options might have changed - so redraw
+    case MsgParameterReceived(index) =>
       handler.post(handleWaypoints _)
   }
 
@@ -491,8 +517,19 @@ class MyMapFragment extends SupportMapFragment
     }
   }
 
+  override def onDestroy() {
+
+    // Our scene is attached to the gmap (which might live on past our view - make sure to remove any left-overs from it)
+    scene.foreach(_.close())
+    scene = None
+
+    super.onDestroy()
+  }
+
   def initMap() {
     mapOpt.foreach { map =>
+      map.clear() // We need to be the exclusive owner of all polylines/markers on the map
+
       scene = Some(new Scene(map))
       map.setMyLocationEnabled(true)
       map.setMapType(GoogleMap.MAP_TYPE_SATELLITE)
@@ -513,16 +550,15 @@ class MyMapFragment extends SupportMapFragment
   private def selectMarker(m: MyMarker) {
     contextMenuCallback.selectedMarker = Some(m)
 
+    invalidateContextMenu() // menu choices might have changed
+
     // Start up action menu if necessary
-    actionMode match {
-      case Some(am) =>
-        invalidateContextMenu() // menu choices might have changed
-      case None =>
-        // FIXME - temp hack to not raise menu for clicks on plane
-        if (!m.isInstanceOf[VehicleMarker]) {
-          startActionMode(contextMenuCallback)
-          getView.setSelected(true)
-        }
+    if (!actionMode.isDefined) {
+      // FIXME - temp hack to not raise menu for clicks on plane
+      if (!m.isInstanceOf[VehicleMarker]) {
+        startActionMode(contextMenuCallback)
+        getView.setSelected(true)
+      }
     }
   }
 
@@ -530,12 +566,14 @@ class MyMapFragment extends SupportMapFragment
     mapOpt.foreach { map =>
       // FIXME Allow altitude choice (by adding altitude to provisional marker)
       myVehicle.foreach { v =>
-        removeProvisionalMarker()
-        val marker = new ProvisionalMarker(l, guideAlt)
-        val m = scene.get.addMarker(marker)
-        m.showInfoWindow()
-        provisionalMarker = Some(marker)
-        selectMarker(marker)
+        if (!v.listenOnly) {
+          removeProvisionalMarker()
+          val marker = new ProvisionalMarker(l, guideAlt)
+          val m = scene.get.addMarker(marker)
+          m.showInfoWindow()
+          provisionalMarker = Some(marker)
+          selectMarker(marker)
+        }
       }
     }
   }
@@ -544,6 +582,14 @@ class MyMapFragment extends SupportMapFragment
     provisionalMarker.foreach(_.remove())
     provisionalMarker = None
   }
+
+  /// For testing
+  val fakeRadio = Some(new msg_radio(1, 1) {
+    rssi = 130
+    remrssi = 130
+    noise = 10
+    remnoise = 10
+  })
 
   /**
    * Generate our scene
@@ -555,55 +601,122 @@ class MyMapFragment extends SupportMapFragment
       scene.foreach { scene =>
 
         def createWaypointSegments() {
-          // Generate segments going between each pair of waypoints (FIXME, won't work with waypoints that don't have x,y position)
-          val pairs = waypointMarkers.zip(waypointMarkers.tail)
-          scene.segments.appendAll(pairs.map { p =>
-            val color = if (p._1.isAutocontinue)
-              Color.GREEN
-            else
-              Color.GRAY
+          if (!waypointMarkers.isEmpty) {
+            // Generate drawables going between each pair of waypoints (FIXME, won't work with waypoints that don't have x,y position)
+            val pairs = waypointMarkers.zip(waypointMarkers.tail)
+            scene.drawables.appendAll(pairs.map { p =>
+              val color = if (p._1.isAutocontinue)
+                Color.GREEN
+              else
+                Color.GRAY
 
-            Segment(p, color)
-          })
+              Segment(p, color)
+            })
+          }
         }
 
         def createFenceSegments() = {
-          val points = v.fenceBoundary.map { p =>
-            new LatLng(p.lat, p.lon)
+          val fenceRadius = v.fenceRadius
+          val homeOpt = v.home
+          if (v.fenceIsCircle && v.isFenceEnable && fenceRadius.isDefined && homeOpt.isDefined) {
+
+            // An arducopter style fence
+
+            val color = Color.YELLOW
+            val home = homeOpt.get.location
+            val center = new LatLng(home.lat, home.lon)
+            val circle = new CircleFactory((new CircleOptions).center(center).strokeColor(color).strokeWidth(8).radius(fenceRadius.get))
+            scene.drawables.append(circle)
+          } else {
+
+            // A plane style fence
+
+            val points = v.fenceBoundary.map { p =>
+              new LatLng(p.lat, p.lon)
+            }
+
+            val color = if (v.fenceAction != FENCE_ACTION.FENCE_ACTION_NONE)
+              Color.YELLOW
+            else
+              Color.GRAY
+
+            val line = PolylineFactory(points, color)
+            scene.drawables.append(line)
           }
+        }
 
-          val color = if (v.fenceAction != FENCE_ACTION.FENCE_ACTION_NONE)
-            Color.YELLOW
-          else
-            Color.GRAY
+        def androidDistance(a: Location, b: Location) = {
+          val results = new Array[Float](1)
+          android.location.Location.distanceBetween(a.lat, a.lon, b.lat, b.lon, results)
+          results(0)
+        }
 
-          val line = PolylineFactory(points, color)
-          scene.segments.append(line)
+        def createRangeCircles() = {
+          // For testing with bluetooth at my desk
+          val fakeData = developerMode && !v.radio.isDefined
+
+          for {
+            r <- if (fakeData) fakeRadio else v.radio
+            map <- mapOpt
+            gcsAndroidLoc <- Option(map.getMyLocation)
+            gcsLoc <- Some(Location(gcsAndroidLoc.getLatitude, gcsAndroidLoc.getLongitude))
+            vLoc <- if (fakeData) {
+              val fakeV = Location(gcsLoc.lat + 0.0005, gcsLoc.lon)
+              Option(fakeV)
+            } else
+              v.location
+          } yield {
+            // Android version is apparently better
+            val curDist = androidDistance(vLoc, gcsLoc) // vLoc.distance(gcsLoc).toFloat
+            val (localRange, remRange) = RadioTools.estimateRangePair(r, curDist)
+            val maxRangeMeters = 50 * 1000 // 50km limit - If we have bogus location for one of the nodes we can get _really_ huge ranges reported
+
+            if (localRange > 0 && localRange < maxRangeMeters) {
+              val gcsLocLatLng = new LatLng(gcsLoc.lat, gcsLoc.lon)
+              scene.drawables.append(new CircleFactory((new CircleOptions).center(gcsLocLatLng).
+                strokeColor(Color.BLUE).strokeWidth(5).radius(localRange)))
+            }
+
+            if (remRange > 0 && localRange < maxRangeMeters) {
+              val vLocLatLng = new LatLng(vLoc.lat, vLoc.lon)
+              scene.drawables.append(new CircleFactory((new CircleOptions).center(vLocLatLng).
+                strokeColor(Color.BLUE).strokeWidth(5).radius(remRange)))
+            }
+          }
         }
 
         val isAuto = v.currentMode == "AUTO"
         var destMarker: Option[MyMarker] = None
 
         debug("Handling new waypoints")
+        //Thread.dumpStack()
         waypointMarkers.foreach(_.remove())
 
         scene.clearSegments() // FIXME - shouldn't touch this
 
         if (!wpts.isEmpty) {
-          waypointMarkers = wpts.map { w =>
-            val r = new DraggableWaypointMarker(w)
-            scene.addMarker(r)
+          waypointMarkers = wpts.flatMap { w =>
 
-            if (isAuto && r.isCurrent)
-              destMarker = Some(r)
+            // If the vehicle has never been armed, then the home location is of low quality - don't show it
+            if (!w.isHome || v.hasBeenArmed) {
+              val r = new DraggableWaypointMarker(w)
+              scene.addMarker(r)
 
-            r
+              if (isAuto && r.isCurrent)
+                destMarker = Some(r)
+
+              Some(r)
+            } else
+              None
           }
 
           createWaypointSegments()
         }
 
+        createRangeCircles()
+
         createFenceSegments()
+
         fenceMarker.foreach(_.remove())
         fenceMarker = v.fenceReturnPoint.map { p =>
           val m = new FenceReturnMarker(p)
@@ -633,7 +746,7 @@ class MyMapFragment extends SupportMapFragment
 
         // Create a segment for the path we expect the plane to take
         for { dm <- destMarker; pm <- planeMarker } yield {
-          scene.segments.append(Segment(pm -> dm, Color.RED))
+          scene.drawables.append(Segment(pm -> dm, Color.RED))
         }
 
         scene.render()

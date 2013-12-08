@@ -8,6 +8,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.graphics.Color
 import java.util.ArrayList
+import android.view.LayoutInflater
+import android.os.Bundle
 
 /**
  * A mixin that makes it easier to use SimpleAdapters
@@ -35,7 +37,12 @@ abstract class ListAdapterHelper[T] extends ListFragment with AndroidLogger {
       setAdapter(newsrc);
     } else {
       debug("Invaliding due to update: " + i + " " + newsrc(i))
-      adapterList.get.set(i, makeRow(i, newsrc(i)).asJava)
+      val l = adapterList.get
+
+      if (l.size >= i)
+        l.set(i, makeRow(i, newsrc(i)).asJava)
+      else
+        error(s"Ignoring invalid adapter index $i")
       adapter.get.notifyDataSetChanged()
     }
   }

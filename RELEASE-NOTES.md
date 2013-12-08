@@ -1,3 +1,198 @@
+* FIXME - do background param fetch
+
+# 1.9.14
+* Hook up GCSAPI to the checklists
+
+# 1.9.13
+* Allow users to place custom checklists in /sdcard/andropilot/checklists/plane.html or copter.html
+* Support FBSOD for Naza-M autopilots (thanks Jay Davis and Mike Knott)
+* List SPORT mode in the modes menu
+* Fix a couple of rare autobugs
+
+# 1.9.12
+* Oops, the 1.9.10 beta broke speech announcement of altitude - thanks Luciano
+* Hide OF_LOITER, TOY_A and TOY_B modes because no one seems to use them
+* Fix an autobug
+
+# 1.9.10
+* ac3.1rc5 now reports gps, magnetometer and rc radio faults - Speak announce such faults (thx Randy)
+* Run speech daemon in the background - this allows speech notifications while
+phone is asleep in your pocket.
+* Spend a bit more time with power profiling.  Using a more efficient version
+of the mavlink code saves a lot of battery.  A Nexus 7 should now be able to
+log for almost 2 hours per charge.
+* Fix more minor autobugs
+
+# 1.9.09
+* Fix a couple of minor/rare autobugs
+
+# 1.9.6
+* Support 'spectator/read-only mode'.  The new 'Read Only' menu item will switch Andropilot into a mode where it _never_ sends packets to the vehicle.  This is useful for vehicles that only have a one-way radio link
+
+# 1.9.5
+* Support the new px4 USB device IDs (reenables direct USB connection to Pixhawk) (Thanks for the report Tridge)
+* Support VERY small screens (320x240) with a special UI (move bluetooth options into menu etc...) (Thanks Rory San Miguel)
+* Better support for nvidia shield 
+* Prompt for arm & disarm in the menu  (thanks Edgar)
+* Do not allow arming (from andropilot only) if the vehicle is not level (thanks Craig Baldwin for the idea)
+
+# 1.9.3
+* We now fetch the current param documentation from the diydrones servers (in both Droneshare and Andropilot)
+* Lower AHRS data download rate when HUD is not up - to save battery & bandwidth
+* Use a higher position download rate - for higher resolution tlogs/map view
+* Support the new MAV_CMD_DO_SET_CAM_TRIGG_DIST command
+* If the vehicle has never been armed, don't show the home icon until it has been so armed... (prevent user confusion with arducopter)
+
+# 1.9.2
+* The new style 3dr radios (shipped with Iris) would not be auto recognized by Andropilot on the first plug attempt (you had to plug them in a second time).  Fixed.
+* If you enable GCS scripting (alpha test) in the settings, you will now have a spiffy new user extensible checklist window (Simon's proposed layout - but most code not hooked up)
+
+# 1.9.1
+* Cope nicely with radios that are dropping many packets (thanks to Glenn McLelland for in depth debugging on this)
+* Promptly send files to droneshare (if so configured)
+* Static content is now served for the beginnings of user runnable checkists and vehicle control scripts.  If you turn this feature on and go to http://localhost:4404/static/README.html you should get an interesting response ;-)
+* Add support for simulating very high error rate links (crappy rctimer radios ;-))
+
+
+# 1.9.0
+* Fix bug that broke loading waypoints from files (thanks to Antonio Alfaro)
+* Include new scripting API (not yet documented - off by default)
+* Fix a couple of rare autobugs
+* Fix a bug where the new radiation warning could fail on screen rotation of certain tablet types (non fatal - but ugh)
+
+# 1.8.19
+* Some non andropilot service crashes frequently without releasing the USB port.  If we find the tablet in that state, we warn the user and suggest a workaround.
+* Add support for 'show on map' for big waypoint lists
+
+# 1.8.17
+* Warn about periods of high solar activity (thanks to NOAA for the data and ligi@ligi.de for a reference implementation).  The app will warn when first launched, or if you choose the new "Solar activity check" menu item.
+* Include sysid for up to three vehicles in the tlog filename
+
+# 1.8.15
+* Use param by value to fetch params (I had turned this off a long time ago because old AC builds didn't support this).  Now that those old <2.93 builds are gone I can turn this back on - MUCH FASTER PARAMETER DOWNLOADS - especially for bluetooth!  (Thanks to Stefan and Peter for asking for this)
+* Fix problems where new state machine would get confused if you attached to a vehicle that was already
+half way through downloading parameters.
+
+# 1.8.14
+* Fix bug where parameter updates wouldn't show up until you moved at least two tabs away from the parameters
+tab.  This bug was introduced in 1.8.01, much thanks to Brendan O'Reilly for the great 'steps to reproduce'.
+* More support for javascript vehicle control (no UI yet)
+
+# 1.8.04
+* Make a new UI that is optimized for small phone screens - it should look pretty nice (if cramped once you turn on screen joysticks) - thanks to Remigijus (in Lithuania!)
+* Allow the various SimpleUI buttons to scroll if necessary for small screens
+* Fix the problem of the service not exiting - introduced in the last release.  Thanks Gary and Luciano for the reports
+
+# 1.8.03
+* Fix screen sleep problem reported by Luciano (thanks!)
+* The new simple UI is mostly finished - just some drawer stuff & art assets left
+* Info fields now float on top left of map view
+* Auto hide the sidebar once we are ready to fly
+
+# 1.8.01
+* Abort RC override if the user of the RC xmitter changes the flight mode switch (Luciano - would you mind confirming this works for you?)
+* First cut of new 'even simpler' UI
+* Misc improvements to the RC joysticks (I've been flying with only the tablet lately)
+* (Alpha) support for multiple vehicles (though not yet shown in most views) - No configuration needed, just attach multiple 3dr radios to a (POWERED) USB hub
+* Beginning of scripting support 
+* The sidebar pane is now dockable - just use the menu to turn it on/off
+
+# 1.7.13
+* Work around for hangs which could occur when sliding HUD into view (on some 4.3 devices): https://code.google.com/p/android/issues/detail?id=58385
+
+# 1.7.12
+* Known bug: using 'gestures' to slide between screens may cause hangs with this version of the app - for this beta
+please just use the screen names at the top of each tab to switch...
+* Add (basic) support for Pebble watches (go to 'music' inside your watch - this is a temporary home for this proof of concept)
+
+# 1.7.10
+* Fix problem introduced where we'd drop the vehicle link occasionally (thanks to beta testers Gary and Luciano)
+* Add extra debugging (and change a suspected error to be non-fatal) if the new state machine gets confused
+* Don't let vehicles arm if the are not at zero throttle (Thanks to Dave C for reporting this important safety issue)
+* Sometimes the AC claims it is flying when it is disarmed, silently deal with this problem...
+
+# 1.7.08
+* Quick fix to make things work better on plane (broken in 1.7.07)
+* Fix a nasty (very rare) race condition that could cause hangs in the HUD code
+
+# 1.7.07
+* SimpleUI: Move status messages into their own fragment (and make them update even if fragment is not visible)
+* SimpleUI: Try to guess likely modes the user would want and put them as buttons at the bottom of the screen
+* SimpleUI: Show the bluetooth device connect/disconnect button
+* SimpleUI: Prompt user with extra dialog if they try especially dangerous mode switches (disconnecting or disarming while we think the vehicle is flying etc...)
+* I played around with the profiler a bit and many operations should now be a bit faster
+* When connected by bluetooth, show proper vehicle state on the icon
+* Make popup modal bar appear in correct position on portrait 7" displays
+* Show HDOP (horizontal position precision) in the gps display
+* Only enable arm menu item if we have a heartbeat from the vehicle
+* Fix the bug where mode changes would be announced twice
+* Fix some minor display glitches
+* Add support for profiling/tracing when in developer mode
+* Fix a couple more rare autobugs
+* SimpleUI: Lots more coming in the next release...
+
+# 1.7.04
+* Announce Arm/Disarm via voice
+* Show estimated radio range as two blue circles (one circle centered on the GCS, one circle centered on the vehicle).
+  This is the predicted range that radio will lose signal reception.
+
+# 1.7.03
+* If a copter fails to arm, voice announce the reason
+* Improve the "Arm" menu item to work 100% correctly for arming/disarming copters
+ 
+# 1.7.00
+* Add support for copter style fences (plane was already supported)
+* Dramatically speed up parameter download over low quality links
+* We now show progress bar as parameters are being downloaded
+* Update autodocs for parameters
+* Update google play services
+
+# 1.6.08
+* Oops - typo, wasn't properly checking min battery voltage from the preferences
+
+# 1.6.07
+* Fix problem where screen joystick would not reappear following screen rotation.  Thanks Steve!
+
+# 1.6.06
+* Joystick trim position would be set correctly only if you had a real RC radio hooked up - fix to work totally without radio
+* Make sure on screen joystick can go all the way to zero throttle
+* Fix a couple of new autobugs
+
+# 1.6.05
+* Fix a couple rare auto bugs
+
+# 1.6.04
+* Oops - Last build accidentally broken Nexus 7 portrait.  Thank Steve S for the fix.
+* Increase throttle travel 2x (thanks Steve S)
+* Don't warn about no gps until we have comms with vehicle (thanks Thomas N)
+* Don't warn about battery % charge if there is no charge data available (thanks Thomas N)
+
+# 1.6.02
+* Fix problems where the screen joysticks directions coule be reversed
+* Add an on-screen panic button to cancel RC override
+* Allow phone sized devices to show joysticks (in landscape orientation)
+
+# 1.6.01
+* Add on-screen joysticks (Choose 'show joystick' from menu - when holding tablet in landscape mode)
+* Make joysticks appear as a translucent overlay
+* Add haptic feedback to let user feel when they cross the zero position on sticks
+* Add support for backup service (so prefs will be restored if phone gets replaced)
+
+# 1.4.18
+* change ground color on horizon to brown
+* refetch waypoints (including Home) whenever vehicle gets rearmed
+* Make joystick based mode changes work correctly on rover
+* Properly handle MOUNT and DIGICAM configure and control waypoints
+
+# 1.4.17
+* add a "Navigate to vehicle" menu item which will use google maps to lead you to the last known vehicle location
+* add support for arming via menus (copter/quad only)
+* fix channel numbering to make RC channels start with 1 rather than zero
+* voice announce arrival at a waypoint
+* fix an autobug: java.lang.IllegalStateException: Adapter is detached
+* fix an autobug: don't let users use invalid port numbers
+* Make flurry optional
+
 # 1.4.15
 * Add support for upcoming accelerometer cal APM feature (not yet tested with real hardware)
 * Update param docs from master

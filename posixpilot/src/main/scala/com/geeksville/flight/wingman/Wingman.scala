@@ -10,6 +10,7 @@ import org.mavlink.messages.ardupilotmega.msg_mission_ack
 import org.mavlink.messages.MAV_MISSION_RESULT
 import com.geeksville.util.Counted
 import com.geeksville.util.MathTools._
+import com.geeksville.flight.HeartbeatSender
 
 /**
  * A full description of how to get from p1 to p2
@@ -19,7 +20,7 @@ import com.geeksville.util.MathTools._
  */
 case class Distance3D(x: Double, z: Double, bearing: Int)
 
-class Wingman extends InstrumentedActor with VehicleSimulator {
+class Wingman extends InstrumentedActor with VehicleSimulator with HeartbeatSender {
   override def systemId = Wingman.systemId
 
   /**
@@ -49,7 +50,7 @@ class Wingman extends InstrumentedActor with VehicleSimulator {
   MavlinkEventBus.subscribe(self, leaderId)
 
   // So we can see acks
-  MavlinkEventBus.subscribe(self, Wingman.targetSystemId)
+  MavlinkEventBus.subscribe(self, targetSystem)
 
   /**
    * Distance & bearing to our lead craft, or None
@@ -72,7 +73,7 @@ class Wingman extends InstrumentedActor with VehicleSimulator {
         // log.debug("WRx" + msg.sysId + ": " + msg)
         leadLoc = Some(VehicleSimulator.decodePosition(msg))
         updateGoal()
-      } else if (msg.sysId == Wingman.targetSystemId) {
+      } else if (msg.sysId == targetSystem) {
         // We have a new update of our position
 
         ourLoc = Some(VehicleSimulator.decodePosition(msg))
@@ -109,7 +110,7 @@ class Wingman extends InstrumentedActor with VehicleSimulator {
       l <- desiredLoc
     } yield {
       // Tell the plane we are controlling the new goal
-      sendMavlink(missionItem(0, l, current = 2, isRelativeAlt = false, targetSystem = Wingman.targetSystemId))
+      sendMavlink(missionItem(0, l, current = 2, isRelativeAlt = false))
 
       // Generate fake position updates for our systemId, so the 'goal' can be seen in QGroundControl
       sendMavlink(makePosition(l))
@@ -132,9 +133,4 @@ object Wingman {
    * The ID we use when sending our messages
    */
   val systemId = 254
-
-  /**
-   * The plane we should control
-   */
-  val targetSystemId = 1
 }

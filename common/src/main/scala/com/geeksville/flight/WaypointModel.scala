@@ -20,6 +20,11 @@ import com.geeksville.mavlink.MavlinkStream
 import com.geeksville.util.ThrottledActor
 import java.io.InputStream
 import scala.io.Source
+import com.geeksville.mavlink.SendYoungest
+import com.geeksville.akka.InstrumentedActor
+import java.io.OutputStream
+import java.io.PrintWriter
+import com.geeksville.util.Using._
 
 //
 // Messages we publish on our event bus when something happens
@@ -38,7 +43,7 @@ case class DoDeleteWaypoint(seqnum: Int)
 case object DoMarkDirty
 
 /**
- * Upload a sequence of waypoints to the vehicle (being careful to not replace home)
+ * Upload a sequence of waypoints to the local view (being careful to not replace home)
  */
 case class DoLoadWaypoints(pts: Seq[Waypoint])
 
@@ -75,9 +80,21 @@ trait WaypointModel extends VehicleClient with WaypointsForMap {
 
   override def onReceive = mReceive.orElse(super.onReceive)
 
+  /**
+   * @return the home waypoint (if we have one)
+   */
+  def home = {
+    waypoints.headOption.flatMap { r =>
+      if (r.isHome)
+        Some(r)
+      else
+        None
+    }
+  }
+
   def isDirty = dirty
 
-  private def mReceive: Receiver = {
+  private def mReceive: InstrumentedActor.Receiver = {
     case DoMarkDirty =>
       setDirty(true)
 
@@ -190,9 +207,36 @@ trait WaypointModel extends VehicleClient with WaypointsForMap {
         onWaypointsCurrentChanged(newWpSeq)
   }
 
+  override protected def onArmedChanged(armed: Boolean) {
+    super.onArmedChanged(armed)
+
+    log.debug("ArmChanged in WP model")
+    // On AC we can't trust home until after arming - so we do this here, download any waypoints from the vehicle and get params
+    self ! StartWaypointDownload
+  }
+
+  override protected def onHeartbeatFound() {
+    hasRequestedWaypoints = false // Force new fetch of waypoints
+    super.onHeartbeatFound()
+  }
+
   private def startWaypointDownload() {
-    log.info("Downloading waypoints")
-    sendWithRetry(missionRequestList(), classOf[msg_mission_count])
+    if (!listenOnly) {
+      log.info("Downloading waypoints")
+      hasRequestedWaypoints = true
+      sendWithRetry(missionRequestList(), classOf[msg_mission_count], onWaypointDownloadFailed)
+    } else
+      log.warn("Listen only mode - not downloading waypoints")
+  }
+
+  protected def onWaypointDownloadFailed() {
+    log.error("Waypoint download failed")
+  }
+
+  private def perhapsRequestWaypoints() {
+    // First contact, download any waypoints from the vehicle and get params
+    if (!hasRequestedWaypoints && !listenOnly)
+      self ! StartWaypointDownload
   }
 
   /**
@@ -239,15 +283,6 @@ trait WaypointModel extends VehicleClient with WaypointsForMap {
     }
   }
 
-  private def perhapsRequestWaypoints() {
-
-    // First contact, download any waypoints from the vehicle and get params
-    if (!hasRequestedWaypoints) {
-      hasRequestedWaypoints = true
-      self ! StartWaypointDownload
-    }
-  }
-
   /**
    * Convert the specified altitude into an AGL altitude
    * FIXME - currently we just use the home location - eventually we should use local terrain alt
@@ -272,7 +307,7 @@ trait WaypointModel extends VehicleClient with WaypointsForMap {
     if (withRetry)
       sendWithRetry(m, classOf[msg_mission_ack])
     else
-      sendMavlink(m)
+      sendMavlink(SendYoungest(m))
     guidedDest = Some(Waypoint(m))
     onWaypointsChanged()
   }
@@ -306,6 +341,38 @@ trait WaypointModel extends VehicleClient with WaypointsForMap {
       log.info("loading waypoints: " + wpts.size)
       val home = waypoints.head
       waypoints = IndexedSeq(home) ++ wpts.filter(!_.isHome)
+      setDirty(true)
+    }
+  }
+
+  /**
+   * Write the wpts to an output stream (we will close the stream afterwards)
+   */
+  def writeToStream(os: OutputStream) {
+    using(new PrintWriter(os)) { p =>
+      p.println("QGC WPL 110")
+
+      def emit(s: Any) {
+        p.print(s.toString)
+        p.print(" ")
+      }
+
+      waypoints.foreach { w =>
+        val msg = w.msg
+        emit(msg.seq)
+        emit(msg.current)
+        emit(msg.frame)
+        emit(msg.command)
+        emit(msg.param1)
+        emit(msg.param2)
+        emit(msg.param3)
+        emit(msg.param4)
+        emit(msg.x)
+        emit(msg.y)
+        emit(msg.z)
+        emit(msg.autocontinue)
+        p.println()
+      }
     }
   }
 

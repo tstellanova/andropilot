@@ -40,35 +40,77 @@ import java.io.IOException
 import android.support.v4.app.NotificationCompat
 import com.geeksville.andropilot.gui.NotificationIds
 import com.bugsense.trace.BugSenseHandler
+import com.geeksville.andropilot.UsesDirectories
+import com.geeksville.flight.OnInterfaceChanged
+import android.hardware.usb.UsbDevice
+import scala.collection.mutable.HashMap
+import com.geeksville.gcsapi.GCSAdapter
+import com.geeksville.gcsapi.TempGCSModel
+import com.geeksville.gcsapi.Webserver
+import com.geeksville.gcsapi.AndroidWebserver
+import com.geeksville.flight.ParameterDocFile
+import com.geeksville.util.ThreadTools
+import com.geeksville.aspeech.TTSClient
 
 trait ServiceAPI extends IBinder {
   def service: AndropilotService
 }
 
-class AndropilotService extends Service with AndroidLogger with FlurryService with AndropilotPrefs with BluetoothConnection with UsesResources {
+class AndropilotService extends Service with TTSClient with AndroidLogger
+  with FlurryService with AndropilotPrefs with BluetoothConnection with UsesResources with UsesDirectories {
   val groundControlId = 255
 
   /**
    * If we are logging the file is here
    */
-  var logfile: Option[File] = None
   private var logger: Option[LogBinaryMavlink] = None
   private var prefListeners: Seq[OnSharedPreferenceChangeListener] = Seq()
 
   var vehicle: Option[VehicleModel] = None
 
-  private var serial: Option[MavlinkStream] = None
+  /**
+   * A mapping from usb unique device id to the stream for that device
+   */
+  private val serial: HashMap[Int, MavlinkStream] = HashMap()
+
   private var udp: Option[InstrumentedActor] = None
 
+  private var speaker: Option[Speaker] = None
+
+  private var btInputStream: Option[InputStream] = None
   private var btStream: Option[MavlinkStream] = None
 
   private var follower: Option[FollowMe] = None
 
   private var uploader: Option[AndroidDirUpload] = None
 
+  private var pebbleListener: Option[PebbleVehicleListener] = None
+
+  private var errorMessage: Option[String] = None
+
+  private var webServer: Option[InstrumentedActor] = None
+
   implicit val context = this
 
   private lazy val wakeLock = getSystemService(Context.POWER_SERVICE).asInstanceOf[PowerManager].newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CPU")
+
+  //
+  // Not really the ideal place for these status things - but leave here for now
+  //
+
+  def isLowVolt = (for { v <- vehicle; volt <- v.batteryVoltage } yield { v.hasHeartbeat && volt < minVoltage }).getOrElse(false)
+
+  /// Apparently ardupane treats -1 for pct charge as 'no idea'
+  def isLowBatPercent = (for { v <- vehicle; pct <- v.batteryPercent } yield {
+    v.hasHeartbeat && (pct < minBatPercent && pct >= -1.0)
+  }).getOrElse(false)
+  def isLowRssi = (for { v <- vehicle; r <- v.radio } yield {
+    val span = minRssiSpan
+
+    v.hasHeartbeat && (r.rssi - span < r.noise || r.remrssi - span < r.remnoise)
+  }).getOrElse(false)
+  def isLowNumSats = (for { v <- vehicle; n <- v.numSats } yield { v.hasHeartbeat && n < minNumSats }).getOrElse(false)
+  def isWarning = isLowVolt || isLowBatPercent || isLowRssi || isLowNumSats
 
   /**
    * Class for clients to access.  Because we know this service always
@@ -84,8 +126,19 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
    */
   private val disconnectReceiver = new BroadcastReceiver {
     override def onReceive(context: Context, intent: Intent) {
-      if (intent.getAction == UsbManager.ACTION_USB_DEVICE_DETACHED)
-        serialDetached()
+      warn("In disconnect receiver")
+
+      def dev = intent.getParcelableExtra[UsbDevice](UsbManager.EXTRA_DEVICE)
+
+      intent.getAction match {
+        case UsbManager.ACTION_USB_DEVICE_DETACHED =>
+          serialDetached(dev.getDeviceId)
+        // We rely on the activity for this (currently)
+        //case UsbManager.ACTION_USB_DEVICE_ATTACHED =>
+        //  serialAttached(dev)
+        case x @ _ =>
+          debug(s"Ignoring USB action $x")
+      }
     }
   }
 
@@ -97,17 +150,25 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
   def assetToString(name: String) = Source.fromInputStream(getAssets().open(name)).
     getLines().mkString("\n")
 
-  def isSerialConnected = serial.isDefined
+  def isSerialConnected = !serial.isEmpty
+  def isBluetoothConnected = btStream.isDefined
   def isFollowMe = follower.isDefined
 
   // Are we talking to a device at all?
-  def isConnected = isSerialConnected || udp.isDefined || btStream.isDefined
+  def isConnected = isSerialConnected || udp.isDefined || isBluetoothConnected
+
+  /**
+   * The USB device ids of any connected serial adapter
+   */
+  def serialDevices = serial.keySet
 
   /**
    * A human readable description of our logging state
    */
   def serviceStatus = {
-    val linkMsg = if (isSerialConnected)
+    val linkMsg = if (errorMessage.isDefined)
+      errorMessage.get
+    else if (isSerialConnected)
       S(R.string.usb_link)
     else if (btStream.isDefined)
       S(R.string.bluetooth_link)
@@ -117,7 +178,7 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       }.getOrElse(S(R.string.no_link))
 
     val logmsg = if (loggingEnabled)
-      logfile.map { f => S(R.string.logging) }.getOrElse(S(R.string.no_sd_card))
+      logger.map { f => S(R.string.logging) }.getOrElse(S(R.string.no_sd_card))
     else
       S(R.string.no_logging)
 
@@ -127,9 +188,9 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       linkMsg + " " + logmsg
   }
 
-  def inboundUdpEnabled = udpMode == UDPMode.Downlink
-  def outboundUdpEnabled = udpMode == UDPMode.Uplink
-  def outboundTcpEnabled = udpMode == UDPMode.TCPUplink
+  def inboundUdpEnabled = udpMode == UDPMode.Downlink && inboundPort <= 65535
+  def outboundUdpEnabled = udpMode == UDPMode.Uplink && outboundPort <= 65535
+  def outboundTcpEnabled = udpMode == UDPMode.TCPUplink && outboundPort <= 65535
 
   private def perhapsUpload() {
     startService(AndroidDirUpload.createIntent(this))
@@ -140,8 +201,17 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
 
     info("Creating service")
 
+    initSpeech()
+
+    // Not really ideal - but good enough for now
+    ParameterDocFile.cacheDir = Some(getFilesDir)
+    ThreadTools.start("docupdate")(ParameterDocFile.updateParamDocs)
+
     // Send any previously spooled files
     perhapsUpload()
+
+    // Find out when the device goes away
+    registerReceiver(disconnectReceiver, new IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
 
     val startFlightLead = false
     if (startFlightLead) {
@@ -161,29 +231,44 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       // MavlinkEventBus.subscribe(MockAkka.actorOf(new HeartbeatMonitor), flightSysId)
     }
 
+    val actor = MockAkka.actorOf(new VehicleModel, "vmon")
+
+    actor.useRequestById = !useOldArducopter
+
+    vehicle = Some(actor)
+
+    speaker = Some(MockAkka.actorOf(new Speaker(this, actor), "speaker"))
+
+    if (runWebserver) {
+      warn("Starting web server")
+      val gcs = new TempGCSModel(actor)
+      val adapter = new GCSAdapter(gcs)
+      webServer = Some(MockAkka.actorOf(new AndroidWebserver(this, adapter, !allowOtherHosts)))
+    }
+
     val dumpSerialRx = false
     if (dumpSerialRx) {
       info("Starting packet log")
 
       // Include this if you want to see all traffic from the ardupilot (use filters to keep less verbose)
-      MockAkka.actorOf(new LogIncomingMavlink(AndropilotService.arduPilotId,
+      MockAkka.actorOf(new LogIncomingMavlink(actor.targetSystem,
         if (dumpSerialRx)
           LogIncomingMavlink.allowDefault
         else
           LogIncomingMavlink.allowNothing), "ardlog")
     }
 
-    val actor = MockAkka.actorOf(new VehicleModel, "vmon")
-    MavlinkEventBus.subscribe(actor, AndropilotService.arduPilotId)
-    vehicle = Some(actor)
+    if (PebbleClient.hasPebble(this))
+      pebbleListener = Some(MockAkka.actorOf(new PebbleVehicleListener(this), "pebble"))
 
-    setLogging()
-    serialAttached()
+    setLogging(true)
+    serialAttachToExisting()
     startUDP()
-    connectToDevices()
+    // We now do this only on user input
+    // connectToDevices()
 
     // If preferences change, automatically toggle logging as needed
-    val handlers = Seq("log_to_file" -> setLogging _,
+    val handlers = Seq("log_to_file" -> setLoggingOn _,
       "udp_mode" -> startUDP _, "outbound_udp_host" -> startUDP _, "inbound_port" -> startUDP _, "outbound_port" -> startUDP _)
     prefListeners = prefListeners ++ handlers.map { p => registerOnPreferenceChanged(p._1)(p._2) }
 
@@ -197,12 +282,14 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       true
     }.getOrElse(false)
 
+    val vehicleId = 1 // FIXME support multiple vehicles for UDP
+
     udp = if (outboundUdpEnabled) {
       info("Creating outbound UDP port")
       val a = MockAkka.actorOf(new MavlinkUDP(destHostName = Some(outboundUdpHost), destPortNumber = Some(outboundPort)), "mavudp")
 
       // Anything from the ardupilot, forward it to the controller app
-      MavlinkEventBus.subscribe(a, AndropilotService.arduPilotId)
+      MavlinkEventBus.subscribe(a, vehicleId)
 
       FlurryAgent.logEvent("udp_outbound")
       Some(a)
@@ -212,7 +299,7 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       val a = MockAkka.actorOf(new MavlinkUDP(localPortNumber = Some(inboundPort)), "mavudp")
 
       // Send our control packets to this UDP link
-      MavlinkEventBus.subscribe(a, VehicleSimulator.andropilotId)
+      MavlinkEventBus.subscribe(a, vehicleId)
 
       FlurryAgent.logEvent("udp_inbound")
       Some(a)
@@ -222,7 +309,7 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       val a = MockAkka.actorOf(MavlinkTCP.connect(outboundUdpHost, outboundPort), "mavtcp")
 
       // Send our control packets to this UDP link
-      MavlinkEventBus.subscribe(a, VehicleSimulator.andropilotId)
+      MavlinkEventBus.subscribe(a, vehicleId)
 
       FlurryAgent.logEvent("tcp_outbound")
       Some(a)
@@ -238,23 +325,24 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       stopHighValue()
   }
 
-  def setLogging() {
+  private def setLoggingOn() = setLogging(true)
+
+  private def setLogging(enable: Boolean) {
     // Generate log files mission control would understand
-    if (loggingEnabled) {
+    if (loggingEnabled && enable) {
       // If already logging ignore
       if (!logger.isDefined)
-        AndropilotService.logDirectory.foreach { d =>
+        logDirectory.foreach { d =>
           try {
-            logfile = Some(LogBinaryMavlink.getFilename(d))
-            val l = MockAkka.actorOf(LogBinaryMavlink.create(!loggingKeepBoring, logfile.get), "gclog")
+            val logfile = LogBinaryMavlink.getFilename(d)
+            val l = MockAkka.actorOf(LogBinaryMavlink.create(!loggingKeepBoring, logfile), "gclog")
             MavlinkEventBus.subscribe(l, -1)
             logger = Some(l)
           } catch {
             case ex: Exception =>
-              BugSenseHandler.sendExceptionMessage("sdwrite", "exception", ex)
+              //BugSenseHandler.sendExceptionMessage("sdwrite", "exception", ex)
               error("Can't access sdcard")
               logger = None
-              logfile = None
           }
         }
     } else
@@ -268,7 +356,6 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
         perhapsUpload()
 
         logger = None
-        logfile = None
       }
   }
 
@@ -291,6 +378,9 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
 
     val port = new MavlinkStream(out, in)
 
+    //port.simulateUnreliable = true
+
+    btInputStream = Some(in)
     // val mavSerial = Akka.actorOf(Props(MavlinkPosix.openSerial(port, baudRate)), "serrx")
     val mavSerial = MockAkka.actorOf(port, "btrx")
     btStream = Some(mavSerial)
@@ -312,47 +402,67 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
     btDetached()
   }
 
-  def serialAttached() {
-    AndroidSerial.getDevice.map { sdev =>
+  def forceBluetoothDisconnect() {
+    info("Force stopping bluetooth")
+    btInputStream.foreach(_.close())
+  }
 
-      info("Starting serial")
+  /**
+   * Connect to any serial devices which were present at boot
+   */
+  def serialAttachToExisting() {
+    val justcreated = AndroidSerial.getDevices.foreach { sdev =>
 
-      val baudRate = if (AndroidSerial.isTelemetry(sdev))
-        baudWireless
+      info(s"Connecting to existing serial $sdev")
+      serialAttached(sdev)
+    }
+  }
+
+  def serialAttached(sdev: UsbDevice) {
+    val i = serial.size // Number based on what ports we've seen
+
+    info(s"Starting serial $i $sdev")
+    errorMessage = None
+
+    val baudRate = if (AndroidSerial.isTelemetry(sdev))
+      baudWireless
+    else
+      baudDirect
+
+    try {
+      val sysIdOverride = if (i != 0)
+        Some(i + 1) // Renumber vehicles on later interfaces as 2, 3, etc...
       else
-        baudDirect
+        None
 
-      try {
-        val port = MavlinkAndroid.create(baudRate)
+      val port = MavlinkAndroid.create(sdev, baudRate, sysIdOverride)
 
-        // val mavSerial = Akka.actorOf(Props(MavlinkPosix.openSerial(port, baudRate)), "serrx")
-        val mavSerial = MockAkka.actorOf(port, "serrx")
-        serial = Some(mavSerial)
+      // val mavSerial = Akka.actorOf(Props(MavlinkPosix.openSerial(port, baudRate)), "serrx")
+      val mavSerial = MockAkka.actorOf(port, "serrx")
 
-        // Anything coming from the controller app, forward it to the serial port
-        MavlinkEventBus.subscribe(mavSerial, groundControlId)
+      // Anything coming from the controller app, forward it to the serial port
+      MavlinkEventBus.subscribe(mavSerial, groundControlId)
 
-        // Also send anything from our active agent to the serial port
-        MavlinkEventBus.subscribe(mavSerial, VehicleSimulator.andropilotId)
+      // Also send anything from our active agent to the serial port (FIXME, only send stuff destined for that interface)
+      MavlinkEventBus.subscribe(mavSerial, VehicleSimulator.andropilotId)
 
-        // Watch for failures - not needed , we watch in the activity with MyVehicleModel
-        // MavlinkEventBus.subscribe(MockAkka.actorOf(new HeartbeatMonitor), arduPilotId)
+      // Watch for failures - not needed , we watch in the activity with MyVehicleModel
+      // MavlinkEventBus.subscribe(MockAkka.actorOf(new HeartbeatMonitor), arduPilotId)
 
-        FlurryAgent.logEvent("serial_attached")
-        startHighValue()
+      FlurryAgent.logEvent("serial_attached")
 
-        // Find out when the device goes away
-        registerReceiver(disconnectReceiver, new IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
-      } catch {
-        case ex: NoAcquirePortException => // Some crummy android devices do not allow device to be acquired
-          error("Can't acquire port")
-          usageEvent("serial_error", "message" -> ex.getMessage)
-        case ex: IOException =>
-          error("Error opening port: " + ex.getMessage)
-          usageEvent("serial_error", "message" -> ex.getMessage)
-      }
-    }.getOrElse {
-      warn("No serial port found by service")
+      serial += (sdev.getDeviceId -> mavSerial)
+
+      startHighValue()
+    } catch {
+      case ex: NoAcquirePortException =>
+        error("Can't acquire port")
+        errorMessage = Some("Some other application has crashed without releasing the USB port.")
+        usageEvent("serial_error", "message" -> ex.getMessage)
+
+      case ex: IOException =>
+        error("Error opening port: " + ex.getMessage)
+        usageEvent("serial_error", "message" -> ex.getMessage)
     }
   }
 
@@ -372,30 +482,44 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
 
       if (stayAwakeEnabled)
         wakeLock.acquire()
+
+      vehicle.foreach(_ ! OnInterfaceChanged(true))
     }
   }
 
   private def stopHighValue() {
+    warn("In stopHighValue")
     if (!isConnected) {
+      vehicle.foreach(_ ! OnInterfaceChanged(false))
+
       endTimedEvent("high_value")
 
       if (wakeLock.isHeld)
         wakeLock.release()
       stopForeground(true) // Get rid of our notification
 
+      // Finish any log files
+      setLogging(false)
+
       warn("Stopping our service, because no serial means not useful...")
       stopSelf()
     }
   }
 
-  private def serialDetached() {
-    serial.foreach { a =>
-      unregisterReceiver(disconnectReceiver)
+  private def serialDetached(id: Int) {
+    warn(s"In serialDetached, id=$id")
+    serial.remove(id).foreach { a =>
+      warn("dettaching one serial device")
 
       a ! PoisonPill
+    }
+    stopHighValue()
+  }
 
-      serial = None
-      stopHighValue()
+  private def serialDetachAll() {
+    warn("In serialDetachAll")
+    serial.keys.toSeq.foreach { a =>
+      serialDetached(a)
     }
   }
 
@@ -404,19 +528,33 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
       a ! PoisonPill
 
       btStream = None
-      stopHighValue()
     }
+    stopHighValue()
   }
 
   override def onDestroy() {
     warn("in onDestroy ******************************")
+
+    setLogging(false)
+
+    pebbleListener.foreach(_ ! PoisonPill)
+    pebbleListener = None
+
     setFollowMe(false)
+    speaker.foreach(_ ! PoisonPill)
+    speaker = None
     prefListeners.foreach(unregisterOnPreferenceChanged)
     prefListeners = Seq()
     udp.foreach(_ ! PoisonPill)
     udp = None
-    serialDetached()
+    webServer.foreach(_ ! PoisonPill)
+    webServer = None
+    serialDetachAll()
+    unregisterReceiver(disconnectReceiver)
     btDetached()
+
+    destroySpeech()
+
     MockAkka.shutdown()
     super.onDestroy()
   }
@@ -435,39 +573,6 @@ class AndropilotService extends Service with AndroidLogger with FlurryService wi
 
     startForeground(NotificationIds.vehicleConnectedId, notification)
   }
+
 }
 
-object AndropilotService {
-  val arduPilotId = 1
-
-  /**
-   * Where we should spool our output files (if allowed)
-   */
-  def sdDirectory = {
-    if (!Environment.getExternalStorageState().equals(Environment.MEDIA_MOUNTED))
-      None
-    else {
-      val sdcard = Environment.getExternalStorageDirectory()
-      if (!sdcard.exists())
-        None
-      else
-        Some(new File(sdcard, "andropilot"))
-    }
-  }
-
-  def logDirectory = sdDirectory.map { sd =>
-    val f = new File(sd, "newlogs")
-    f.mkdirs()
-    f
-  }
-  def uploadedDirectory = sdDirectory.map { sd =>
-    val f = new File(sd, "uploaded")
-    f.mkdirs()
-    f
-  }
-  def paramDirectory = sdDirectory.map { sd =>
-    val f = new File(sd, "param-files")
-    f.mkdirs()
-    f
-  }
-}

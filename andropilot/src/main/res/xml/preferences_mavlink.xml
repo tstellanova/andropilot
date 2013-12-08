@@ -17,14 +17,19 @@
         android:summary="Backup parameters to /sdcard/andropilot"
         android:title="Backup parameters" />
     <CheckBoxPreference
-        android:defaultValue="false"
+        android:defaultValue="true"
         android:key="force_screenon"
         android:summary="Don&apos;t let the screen dim when map is shown"
         android:title="Keep screen on" />
+    <!--  <CheckBoxPreference
+        android:defaultValue="true"
+        android:key="stay_awake2"
+        android:summary="Keeps CPU from sleeping when device is connected"
+        android:title="Stay awake when connected" /> -->
     <CheckBoxPreference
         android:defaultValue="true"
-        android:key="stay_awake"
-        android:summary="Keeps CPU from sleeping when device is connected"
-        android:title="Stay awake when connected" />
+        android:key="use_flurry"
+        android:summary="Use flurry to send anonymous usage data/bug reports to developers"
+        android:title="Send usage data" />
 
 </PreferenceScreen>

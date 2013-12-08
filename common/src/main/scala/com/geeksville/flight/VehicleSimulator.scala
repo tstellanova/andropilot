@@ -47,31 +47,45 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg.custom_mode = 0
     msg.system_status = MAV_STATE.MAV_STATE_ACTIVE
     msg.mavlink_version = 3 // Seems to be what ardupilot uses
-
     msg
   }
 
-  // Send a heartbeat every few seconds 
-  val heartbeatSender = acontext.system.scheduler.schedule(1 seconds, 3 seconds) {
-    //self.log.debug("Sending heartbeat")
-    sendMavlink(heartbeat)
-  }
-
+  /**
+   * This is the _source_ (not target) system id for when sending messages
+   */
   def systemId: Int
 
-  def sendMavlink(m: MAVLinkMessage) = MavlinkEventBus.publish(m)
-  def sendMavlink(m: SendYoungest) = MavlinkEventBus.publish(m)
+  /**
+   * The system we are trying to control
+   */
+  protected def targetSystem: Int = 1
 
-  override def postStop() {
-    log.debug("cancelling heartbeat sender")
-    heartbeatSender.cancel()
-    super.postStop()
+  /**
+   * In special cases (spectator mode, or a RX only radio, we want to suppress _any_ packet sends to the vehicle)
+   */
+  var listenOnly = false
+
+  def sendMavlink(m: MAVLinkMessage) {
+    if (!listenOnly)
+      MavlinkEventBus.publish(m)
+  }
+
+  /**
+   * Send packets even if we are supposed to only listen (useful for GCS heartbeat)
+   */
+  protected def sendMavlinkAlways(m: MAVLinkMessage) {
+    MavlinkEventBus.publish(m)
+  }
+
+  def sendMavlink(m: SendYoungest) {
+    if (!listenOnly)
+      MavlinkEventBus.publish(m)
   }
 
   /**
    * Set by ardupilot custom modes
    */
-  def setMode(mode: Int, targetSystem: Int = 1) = {
+  def setMode(mode: Int) = {
     val msg = new msg_set_mode(systemId, componentId)
     msg.base_mode = MAV_MODE_FLAG.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
     msg.custom_mode = mode
@@ -80,7 +94,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def commandLong(command: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def commandLong(command: Int, targetComponent: Int = 1) = {
     val msg = new msg_command_long(systemId, componentId)
     msg.command = command
     msg.target_system = targetSystem
@@ -88,8 +102,8 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def secondarySetMode(secondaryMode: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
-    val r = commandLong(MAV_CMD.MAV_CMD_DO_SET_MODE, targetSystem, targetComponent)
+  def secondarySetMode(secondaryMode: Int, targetComponent: Int = 1) = {
+    val r = commandLong(MAV_CMD.MAV_CMD_DO_SET_MODE, targetComponent)
     r.param1 = secondaryMode
     r
   }
@@ -103,11 +117,11 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
   /**
    * Do a manual levelling operation
    */
-  def commandDoCalibrate(targetSystem: Int = 1, targetComponent: Int = 1,
+  def commandDoCalibrate(targetComponent: Int = 1,
     calINS: Boolean = false,
     calBaro: Boolean = false,
     calAccel: Boolean = false) = {
-    val r = commandLong(MAV_CMD.MAV_CMD_PREFLIGHT_CALIBRATION, targetSystem, targetComponent)
+    val r = commandLong(MAV_CMD.MAV_CMD_PREFLIGHT_CALIBRATION, targetComponent)
     r.param1 = if (calINS) 1 else 0 // Cal INS
     r.param2 = 0
     r.param3 = if (calBaro) 1 else 0 // Cal Baro
@@ -115,24 +129,31 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     r
   }
 
+  protected def commandDoArm(armed: Boolean, targetComponent: Int = 250) = {
+    val r = commandLong(MAV_CMD.MAV_CMD_COMPONENT_ARM_DISARM, targetComponent)
+    r.param1 = if (armed) 1 else 0
+    r.param2 = 0
+    r
+  }
+
   // The following variants aren't really needed, at least for Ardupilot you can just use SET_MODE
 
-  def commandLoiter(targetSystem: Int = 1, targetComponent: Int = 1) = commandLong(MAV_CMD.MAV_CMD_NAV_LOITER_UNLIM, targetSystem, targetComponent)
-  def commandRTL(targetSystem: Int = 1, targetComponent: Int = 1) = commandLong(MAV_CMD.MAV_CMD_NAV_RETURN_TO_LAUNCH, targetSystem, targetComponent)
+  def commandLoiter(targetComponent: Int = 1) = commandLong(MAV_CMD.MAV_CMD_NAV_LOITER_UNLIM, targetComponent)
+  def commandRTL(targetComponent: Int = 1) = commandLong(MAV_CMD.MAV_CMD_NAV_RETURN_TO_LAUNCH, targetComponent)
   // def commandAuto(targetSystem: Int = 1, targetComponent: Int = 1) = commandLong(MAV_CMD.MAV_CMD_MISSION_START, targetSystem, targetComponent)
 
-  def commandManual(targetSystem: Int = 1, targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_MANUAL_ARMED, targetSystem, targetComponent)
-  def commandAuto(targetSystem: Int = 1, targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_AUTO_ARMED, targetSystem, targetComponent)
-  def commandFBWA(targetSystem: Int = 1, targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_STABILIZE_ARMED, targetSystem, targetComponent)
+  def commandManual(targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_MANUAL_ARMED, targetComponent)
+  def commandAuto(targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_AUTO_ARMED, targetComponent)
+  def commandFBWA(targetComponent: Int = 1) = secondarySetMode(MAV_MODE.MAV_MODE_STABILIZE_ARMED, targetComponent)
 
-  def paramRequestList(targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def paramRequestList(targetComponent: Int = 1) = {
     val msg = new msg_param_request_list(systemId, componentId)
     msg.target_system = targetSystem
     msg.target_component = targetComponent
     msg
   }
 
-  def paramSet(paramId: String, paramType: Int, paramVal: Float, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def paramSet(paramId: String, paramType: Int, paramVal: Float, targetComponent: Int = 1) = {
     val msg = new msg_param_set(systemId, componentId)
     msg.setParam_id(paramId)
     msg.param_value = paramVal
@@ -142,7 +163,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def paramRequestReadByIndex(paramIndex: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def paramRequestReadByIndex(paramIndex: Int, targetComponent: Int = 1) = {
     val msg = new msg_param_request_read(systemId, componentId)
     msg.param_index = paramIndex
     msg.target_system = targetSystem
@@ -150,7 +171,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def paramRequestReadById(id: String, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def paramRequestReadById(id: String, targetComponent: Int = 1) = {
     val msg = new msg_param_request_read(systemId, componentId)
     msg.param_index = -1
     msg.setParam_id(id)
@@ -159,7 +180,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def rcChannelsOverride(targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def rcChannelsOverride(targetComponent: Int = 1) = {
     val msg = new msg_rc_channels_override(systemId, componentId)
 
     msg.target_system = targetSystem
@@ -167,7 +188,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def requestDataStream(id: Int, freqHz: Int, enabled: Boolean, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def requestDataStream(id: Int, freqHz: Int, enabled: Boolean, targetComponent: Int = 1) = {
     val msg = new msg_request_data_stream(systemId, componentId)
     msg.target_system = targetSystem
     msg.target_component = targetComponent
@@ -177,7 +198,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def fenceFetchPoint(pointNum: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def fenceFetchPoint(pointNum: Int, targetComponent: Int = 1) = {
     val msg = new msg_fence_fetch_point(systemId, componentId)
     msg.target_system = targetSystem
     msg.target_component = targetComponent
@@ -185,7 +206,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def fencePoint(pointNum: Int, count: Int, lat: Float, lng: Float, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def fencePoint(pointNum: Int, count: Int, lat: Float, lng: Float, targetComponent: Int = 1) = {
     val msg = new msg_fence_point(systemId, componentId)
     msg.target_system = targetSystem
     msg.target_component = targetComponent
@@ -196,7 +217,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def missionRequestList(targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionRequestList(targetComponent: Int = 1) = {
     /* * MISSION_REQUEST_LIST {target_system : 1, target_component : 1}
 * MISSION_COUNT {target_system : 255, target_component : 190, count : 1}
 * MISSION_REQUEST {target_system : 1, target_component : 1, seq : 0} */
@@ -207,7 +228,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def missionRequest(seq: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionRequest(seq: Int, targetComponent: Int = 1) = {
     /* * MISSION_REQUEST_LIST {target_system : 1, target_component : 1}
 * MISSION_COUNT {target_system : 255, target_component : 190, count : 1}
 * MISSION_REQUEST {target_system : 1, target_component : 1, seq : 0} */
@@ -218,7 +239,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def missionAck(typ: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionAck(typ: Int, targetComponent: Int = 1) = {
     val msg = new msg_mission_ack(systemId, componentId)
     msg.`type` = typ
     msg.target_system = targetSystem
@@ -226,7 +247,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def missionCount(count: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionCount(count: Int, targetComponent: Int = 1) = {
     val msg = new msg_mission_count(systemId, componentId)
     msg.count = count
     msg.target_system = targetSystem
@@ -237,7 +258,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
   /**
    * DO NOT USE - not supported on Copters
    */
-  def missionWritePartial(start: Int, end: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionWritePartial(start: Int, end: Int, targetComponent: Int = 1) = {
     val msg = new msg_mission_write_partial_list(systemId, componentId)
     msg.start_index = start
     msg.end_index = end
@@ -246,7 +267,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
     msg
   }
 
-  def missionSetCurrent(seq: Int, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionSetCurrent(seq: Int, targetComponent: Int = 1) = {
     val msg = new msg_mission_set_current(systemId, componentId)
     msg.seq = seq
     msg.target_system = targetSystem
@@ -260,7 +281,7 @@ mavlink_version uint8_t_mavlink_version MAVLink version, not writable by user, g
    * The device responds with: INFO  c.g.mavlink.LogIncomingMavlink      : Rcv1: MAVLINK_MSG_ID_MISSION_ACK :   target_system=255  target_component=190  type=0
    *
    */
-  def missionItem(seq: Int, location: Location, current: Int = 0, isRelativeAlt: Boolean = true, targetSystem: Int = 1, targetComponent: Int = 1) = {
+  def missionItem(seq: Int, location: Location, current: Int = 0, isRelativeAlt: Boolean = true, targetComponent: Int = 1) = {
     val msg = new msg_mission_item(systemId, componentId)
     msg.seq = seq
     msg.x = location.lat.toFloat

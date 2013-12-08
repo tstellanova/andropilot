@@ -19,8 +19,10 @@ import android.graphics.Color
 import com.geeksville.flight.MsgParameterReceived
 import android.support.v4.app.Fragment
 import com.geeksville.flight.ParametersModel
+import com.geeksville.flight.MsgParameterDownloadProgress
+import com.geeksville.akka.InstrumentedActor
 
-class ParameterListFragment extends ListAdapterHelper[ParametersModel#ParamValue] with AndroServiceFragment {
+class ParameterListFragment extends ListAdapterHelper[ParametersModel#ParamValue] with ProgressList with AndroServiceFragment {
   private var selected = -1
   private var haveInitialParams = false
 
@@ -36,6 +38,8 @@ class ParameterListFragment extends ListAdapterHelper[ParametersModel#ParamValue
     debug("Creating parameter list view")
     // Inflate the layout for this fragment
     super.onActivityCreated(savedInstanceState)
+
+    progressBar.foreach(_.setMax(100 * 100))
 
     // Fire up our editor dialog as needed
     getListView.setOnItemLongClickListener(new OnItemLongClickListener {
@@ -60,14 +64,25 @@ class ParameterListFragment extends ListAdapterHelper[ParametersModel#ParamValue
     })
   }
 
-  override def onVehicleReceive = {
+  override def onVehicleReceive: InstrumentedActor.Receiver = {
     case MsgParametersDownloaded =>
-      haveInitialParams = true
       handler.post(updateParameters _)
 
+    case MsgParameterDownloadProgress(primary, secondary) =>
+      handler.post { () =>
+        progressBar.foreach { bar =>
+          bar.setProgress(primary * 100)
+          bar.setSecondaryProgress(primary * 100 + secondary * 100)
+        }
+      }
+
     case MsgParameterReceived(index) =>
-      if (haveInitialParams) // Don't bother with every little update when we haven't received our big squirt
+      if (haveInitialParams) { // Don't bother with every little update when we haven't received our big squirt
+        debug(s"fragment applying update for $index")
         handler.post { () => updateParameter(index) }
+      } else {
+        //debug(s"ignoring pre-update for $index")
+      }
   }
 
   /**
@@ -136,6 +151,7 @@ class ParameterListFragment extends ListAdapterHelper[ParametersModel#ParamValue
 
   private def makeAdapter() =
     for (v <- myVehicle if !v.parameters.isEmpty) yield {
+      haveInitialParams = true
       debug("Setting parameter list to " + v.parameters.size + " items")
 
       setAdapter(v.parameters)

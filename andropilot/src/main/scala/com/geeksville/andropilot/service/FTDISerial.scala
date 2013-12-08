@@ -6,8 +6,9 @@ import scala.collection.JavaConverters._
 import java.io._
 import com.ftdi.j2xx.D2xxManager
 import com.ftdi.j2xx.FT_Device
+import android.hardware.usb.UsbDevice
 
-class FTDISerial(baudRate: Int)(implicit context: Context) extends AndroidSerial with AndroidLogger {
+class FTDISerial(rawDevice: UsbDevice, baudRate: Int)(implicit context: Context) extends AndroidSerial with AndroidLogger {
 
   private var devOpt: Option[FT_Device] = None
 
@@ -82,21 +83,24 @@ class FTDISerial(baudRate: Int)(implicit context: Context) extends AndroidSerial
 
       // We wait for writes to complete, so if we get backed up we can make a decision on handling on a packet by packet basis
       if (!shuttingDown)
-        devOpt.foreach(_.write(b, len, true))
+        try {
+          devOpt.foreach(_.write(b, len, true))
+        } catch {
+          case ex: NullPointerException =>
+            error("Ignoring NPE inside of FTDI code")
+        }
     }
   }
 
-  open()
+  open(rawDevice)
 
-  private def open() {
-    info("Opening FTDI device")
+  private def open(rawDevice: UsbDevice) {
+    info(s"Opening FTDI device $rawDevice")
     val d2xx = D2xxManager.getInstance(context)
 
-    val numDev = d2xx.createDeviceInfoList(context);
-    if (numDev < 1)
-      throw new IOException("No FTDI devices")
+    d2xx.addUsbDevice(rawDevice)
 
-    val dev = d2xx.openByIndex(context, 0)
+    var dev = d2xx.openByUsbDevice(context, rawDevice)
 
     if (dev == null)
       throw new IOException("FTDI open failed")

@@ -22,7 +22,7 @@ import HttpConstants._
 import Method._
 
 /// A very small REST/web server.  Create and register handlers by calling addHandler
-class MicroRESTServer(portNum: Int) {
+class MicroRESTServer(portNum: Int, val localOnly: Boolean = true) {
   val queueLen = 10
   private val serverSocket = new ServerSocket(portNum, queueLen)
   private val listenerThread = ThreadTools.createDaemon("RESTServe")(readerFunct)
@@ -33,7 +33,7 @@ class MicroRESTServer(portNum: Int) {
   // Http req looks like GET /fish HTTP/1.1
   private val ReqRegex = "(.+) (.+) (.+)".r
   // headers look like Foo-Blah: somevalue
-  private val HeaderRegex = "(.+): (.+)".r
+  private val HeaderRegex = "(.+):\\s*(.+)".r
 
   listenerThread.start()
 
@@ -56,54 +56,63 @@ class MicroRESTServer(portNum: Int) {
   private def handleConnection(client: Socket) {
     var firstLine = ""
     try {
-      client.setKeepAlive(true)
+      val other = client.getRemoteSocketAddress.asInstanceOf[InetSocketAddress]
+      println("GCS connection request from " + other.getAddress.getHostAddress)
+      if (localOnly && other.getAddress.getHostAddress != "127.0.0.1") {
+        println("Refusing remote client")
+        (new ErrorResponse(401, "UNAUTHORIZED", "Remote connections refused")).send(client)
+      } else {
+        client.setKeepAlive(true)
 
-      val reqStream = client.getInputStream
-      val reqLines = new UnbufferedStreamSource(reqStream).getLines
-      firstLine = reqLines.next.trim
-      println("Request: " + firstLine)
-      // Read headers till blank line
-      val headerMap = Map(reqLines.takeWhile(_.length != 0).toSeq.map { line =>
-        val HeaderRegex(k, v) = line.trim
-        k -> v
-      }: _*)
-      // print(headerMap.mkString("Request headers:\n  ", "\n  ", "\n"))
+        val reqStream = client.getInputStream
+        val reqLines = new UnbufferedStreamSource(reqStream).getLines
+        firstLine = reqLines.next.trim
+        print("Request: " + firstLine + " ")
+        // Read headers till blank line
+        val headerMap = Map(reqLines.takeWhile(_.length != 0).toSeq.map { line =>
+          //println(s"Considering: $line")
+          val HeaderRegex(k, v) = line.trim
+          k -> v
+        }: _*)
+        println(headerMap.mkString("headers: ", ", ", ""))
 
-      val ReqRegex(methodStr, req, httpVer) = firstLine
-      var reqURI = new URI(req)
-      val reqPath = Option(reqURI.getPath).getOrElse("")
+        val ReqRegex(methodStr, req, httpVer) = firstLine
+        var reqURI = new URI(req)
+        val reqPath = Option(reqURI.getPath).getOrElse("")
 
-      // Loop until we find a handler and call it
-      val handler = handlers.find { h =>
-        val matches = h.pathRegex.unapplySeq(reqPath)
-        if (matches.isDefined && h.canHandle(matches.get)) {
+        // Loop until we find a handler and call it
+        val handler = handlers.find { h =>
+          val matches = h.pathRegex.unapplySeq(reqPath)
           val method = Method.withName(methodStr)
-          val queryStr = reqURI.getQuery
-          val params = MicroRESTServer.parseParams(queryStr)
+          if (matches.isDefined && h.canHandle(method, matches.get)) {
+            val queryStr = reqURI.getQuery
+            val params = MicroRESTServer.parseParams(queryStr)
 
-          // Construct a source with the right # of bytes
-          val contentLength = headerMap.getOrElse("Content-Length", "-1").toInt
-          val headStream = if (contentLength != -1)
-            new HeadInputStream(reqStream, contentLength)
-          else
-            reqStream
-          val req = Request(client, reqURI, matches.get, method, headStream, params)
-          h.replyToRequest(req)
+            // Construct a source with the right # of bytes
+            val contentLength = headerMap.getOrElse("Content-Length", "-1").toInt
+            val headStream = if (contentLength != -1)
+              new HeadInputStream(reqStream, contentLength)
+            else
+              reqStream
+            val req = Request(client, reqURI, matches.get, headStream, params)
+            h.replyToRequest(req)
 
-          true // We just handled things
-        } else
-          false
-      }
-      if (!handler.isDefined) {
-        val notFound = new ErrorResponse(404, "NOT FOUND",
-          "%s did not match any resource".format(reqPath))
+            true // We just handled things
+          } else
+            false
+        }
+        if (!handler.isDefined) {
+          val notFound = new ErrorResponse(404, "NOT FOUND",
+            "%s did not match any resource".format(reqPath))
 
-        println("ERROR could not find: " + reqPath)
-        notFound.send(client)
+          println("ERROR could not find: " + reqPath)
+          notFound.send(client)
+        }
       }
     } catch {
       case ex: MatchError =>
-        println("bad client request: " + firstLine)
+        println(s"malformed headers for: $firstLine $ex")
+        // ex.printStackTrace()
         client.close()
 
       case ex: Exception =>

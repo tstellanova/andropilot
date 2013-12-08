@@ -1,0 +1,195 @@
+%{
+//
+// Copyright (c) 2013 Kevin Hester
+// All rights reserved.
+//
+%}
+
+// This FSM works for the VehicleModel class
+
+%class VehicleModel
+%package com.geeksville.flight
+%fsmclass VehicleFSM
+%access package
+
+%start VehicleFSM::WantInterface
+%map VehicleFSM
+%%
+
+//
+// Begin the 4 initializing states
+
+WantInterface
+{
+  OnHasInterface
+    WantVehicle
+    {}
+
+  // If we receive an old loss of heartbeat message, but don't have an interface don't leave this state
+  OnLostHeartbeat
+    nil
+    {}
+  
+  // Likewise for old have heartbeat msgs
+  OnHasHeartbeat
+    nil
+    {}  
+    
+  // Ignore stale messages if radio was unplugged at the wrong time
+  OnParametersDownloaded
+    nil
+    {}       
+
+  // Ignore stale messages if radio was unplugged at the wrong time
+  HBSaysArmed
+    nil
+    {}   
+}
+
+WantVehicle
+{
+  OnHasHeartbeat [ !ctxt.listenOnly ]
+    DownloadingWaypoints 
+    {}
+  
+  // Skip wp/param download if we can't xmit to vehicle
+  OnHasHeartbeat [ ctxt.listenOnly ]
+    DownloadedParameters 
+    {}    
+  
+  // Ignore stale messages if radio was unplugged at the wrong time
+  OnParametersDownloaded
+    nil
+    {}  
+}
+
+DownloadingWaypoints
+{
+  OnWaypointsDownloaded
+    DownloadingParameters
+    {}
+
+  // Ignore most transitions while downloading wpts/parameters
+  HBSaysArmed
+    nil
+    {}
+
+  HBSaysDisarmed
+    nil
+    {}
+
+  HBSaysFlying
+    nil
+    {}
+}
+
+DownloadingParameters
+/* Entry { setStreamEnable(false); }
+Exit { setStreamEnable(true); } */
+{
+
+  OnParametersDownloaded
+    DownloadedParameters
+    {}
+
+  // Ignore most transitions while downloading wpts/parameters
+  HBSaysArmed
+    nil
+    {}
+
+  HBSaysDisarmed
+    nil
+    {}
+
+  HBSaysFlying
+    nil
+    {}
+}
+
+DownloadedParameters
+Entry { handleStartupComplete(); }
+{
+  HBSaysArmed
+    Armed
+    {}
+
+  HBSaysDisarmed
+    Disarmed
+    {}
+
+  HBSaysFlying
+    Flying
+    {}
+}
+
+//
+// Now the operational states
+//
+
+Disarmed
+{
+  HBSaysArmed
+    Armed
+    {}
+  
+  // Ignore this until we are also armed - the vehicle just made a brief mistake...
+  HBSaysFlying
+    nil
+    {}    
+}
+
+Armed
+{
+  HBSaysDisarmed
+    Disarmed
+    {}
+
+  HBSaysFlying
+    Flying
+    {}
+}
+
+Flying
+{
+  HBSaysDisarmed
+    Disarmed
+    {}
+    
+  // Ignore stale notice
+  HBSaysArmed
+    nil
+    {}    
+    
+  // Just stay in this state for redundant notifies
+  HBSaysFlying
+    nil
+    {}    
+}
+
+//
+// Default transitions
+//
+
+Default
+{
+  OnLostHeartbeat
+    WantVehicle
+    {}
+
+  OnLostInterface
+    WantInterface
+    {}
+
+  // In most states we don't care if a new set of waypoints has been downloaded - only useful if we are in DownloadingWaypoints
+  OnWaypointsDownloaded
+    nil
+    {}
+    
+  Default
+    nil
+    {
+    	onUndefinedTransition(endState);
+    }
+}
+
+%%
